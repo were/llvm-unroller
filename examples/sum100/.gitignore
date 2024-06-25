@@ -1,0 +1,5 @@
+*.out
+*.ll
+*.dSYM
+trace_dumper.cpp
+tracer.cpp
