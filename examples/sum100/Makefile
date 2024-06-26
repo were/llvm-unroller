@@ -12,14 +12,11 @@ kernel.ll.instrumented.ll: kernel.ll
 sum100_trace.ll: trace_dumper.out
 	./$^ > $@ 
 
-trace_dumper.cpp: tracer.out
+trace.json: tracer.out
 	./$^ > $@
 
 tracer.out: kernel.ll.instrumented.ll main.c
 	$(LLVM_HOME)/bin/clang -o $@ $^ -Wall -pedantic $(SYSROOT) -g
-
-trace_dumper.out: trace_dumper.cpp
-	$(LLVM_HOME)/bin/clang++ -o $@ $^ -Wall -pedantic $(SYSROOT) -g -O3
 
 sum100_trace.ll: trace_dumper.out
 	./$^
