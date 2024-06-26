@@ -54,34 +54,61 @@ std::string dumpRightValue(llvm::Value *rval, llvm::Module *mod, bool with_type,
   return res;
 }
 
-std::string dumpInstruction(llvm::Value *v, LinearizedValues &cache) {
-  static int counter = 0;
-  std::string buffer;
-  llvm::raw_string_ostream oss(buffer);
+struct DumpInstruction {
+  llvm::Instruction *ip;
+  std::string dump;
+  llvm::Instruction *raw;
+  bool valued;
+
+  DumpInstruction(llvm::Instruction *raw_)
+    : ip(nullptr), dump(), raw(raw_), valued(false) {}
+
+  DumpInstruction(llvm::Instruction *ip, std::string dump_)
+    : ip(ip), dump(dump_), raw(nullptr), valued(false) {}
+
+  llvm::Instruction *getInsertPoint() {
+    if (ip) {
+      return ip;
+    }
+    if (valued) {
+      return raw->getNextNode();
+    }
+    return raw;
+  }
+};
+
+DumpInstruction dumpInstruction(llvm::Value *v, LinearizedValues &cache) {
   if (auto i = llvm::dyn_cast<llvm::Instruction>(v)) {
+    DumpInstruction res(i);
+    auto &valued = res.valued;
+    llvm::raw_string_ostream oss(res.dump);
     oss << "  {\n";
     oss << "    \"raw\": \"" << *v << "\",\n";
     auto mod = i->getParent()->getParent()->getParent();
     if (auto br = llvm::dyn_cast<llvm::BranchInst>(i)) {
       oss << "    \"opcode\": \"br\",\n";
       oss << "    \"from\": " << cache[br->getParent()] << "\n";
+      valued = false;
     } else if (auto ai = llvm::dyn_cast<llvm::AllocaInst>(i)) {
       oss << "    \"lval\": " << cache[ai] << ",\n";
       oss << "    \"opcode\": \"alloca\",\n";
       oss << "    \"align\": " << ai->getAlign().value() << ",\n";
       oss << "    \"type\": \"" << *ai->getAllocatedType() << "\"\n";
+      valued = false; // TODO(@were): I am not sure if this is correct.
     } else if (auto bo = llvm::dyn_cast<llvm::BinaryOperator>(i)) {
       oss << "    \"lval\": " << cache[bo] << ",\n";
       oss << "    \"opcode\": \"" << bo->getOpcodeName() << "\",\n";
       oss << "    \"type\": \"" << *bo->getType() << "\",\n";
       oss << "    \"lhs\": " << dumpRightValue(bo->getOperand(0), mod, false, cache) << ",\n";
-      oss << "    \"rhs\": " << dumpRightValue(bo->getOperand(1), mod, false, cache) << "\n";
+      oss << "    \"rhs\": " << dumpRightValue(bo->getOperand(1), mod, false, cache) << ",\n";
+      valued = true;
     } else if (auto icmp = llvm::dyn_cast<llvm::ICmpInst>(i)) {
       oss << "    \"lval\": " << cache[icmp] << ",\n";
       oss << "    \"pred\": \"" << llvm::CmpInst::getPredicateName(icmp->getPredicate()) << "\",\n";
       oss << "    \"type\": \"" << *icmp->getType() << "\",\n";
       oss << "    \"lhs\": " << dumpRightValue(icmp->getOperand(0), mod, false, cache) << ",\n";
-      oss << "    \"rhs\": " << dumpRightValue(icmp->getOperand(1), mod, false, cache) << "\n";
+      oss << "    \"rhs\": " << dumpRightValue(icmp->getOperand(1), mod, false, cache) << ",\n";
+      valued = true;
     } else if (auto phi = llvm::dyn_cast<llvm::PHINode>(i)) {
       oss << "    \"lval\": " << cache[phi] << ",\n";
       oss << "    \"opcode\": \"phi\",\n";
@@ -99,7 +126,8 @@ std::string dumpInstruction(llvm::Value *v, LinearizedValues &cache) {
           oss << "\n";
         }
       }
-      oss << "    ]\n";
+      oss << "    ],\n";
+      valued = true;
     } else if (auto gep = llvm::dyn_cast<llvm::GetElementPtrInst>(i)) {
       oss << "    \"lval\": " << cache[gep] << ",\n";
       oss << "    \"opcode\": \"getelementptr\",\n";
@@ -113,37 +141,43 @@ std::string dumpInstruction(llvm::Value *v, LinearizedValues &cache) {
           oss << ",";
         }
       }
-      oss << " ]\n";
+      oss << " ],\n";
+      valued = true;
     } else if (auto load = llvm::dyn_cast<llvm::LoadInst>(i)) {
       oss << "    \"lval\": " << cache[load] << ",\n";
       oss << "    \"opcode\": \"load\",\n";
       oss << "    \"type\": \"" << *load->getType() << "\",\n";
       oss << "    \"ptr\": " << dumpRightValue(load->getPointerOperand(), mod, false, cache) << ",\n";
-      oss << "    \"align\": " << load->getAlign().value() << "\n";
+      oss << "    \"align\": " << load->getAlign().value() << ",\n";
+      valued = true;
     } else if (auto select = llvm::dyn_cast<llvm::SelectInst>(i)) {
       oss << "    \"lval\": " << cache[select] << ",\n";
       oss << "    \"opcode\": \"select\",\n";
       oss << "    \"type\": \"" << *select->getType() << "\",\n";
       oss << "    \"cond\": " << dumpRightValue(select->getCondition(), mod, false, cache) << ",\n";
       oss << "    \"true_val\": " << dumpRightValue(select->getTrueValue(), mod, false, cache) << ",\n";
-      oss << "    \"false_val\": " << dumpRightValue(select->getFalseValue(), mod, false, cache) << "\n";
+      oss << "    \"false_val\": " << dumpRightValue(select->getFalseValue(), mod, false, cache) << ",\n";
+      valued = true;
     } else if (auto trunc = llvm::dyn_cast<llvm::TruncInst>(i)) {
       oss << "    \"lval\": " << cache[trunc] << ",\n";
       oss << "    \"opcode\": \"trunc\",\n";
       oss << "    \"dst_type\": \"" << *trunc->getType() << "\",\n";
       oss << "    \"src_type\": \"" << *trunc->getOperand(0)->getType() << "\",\n";
-      oss << "    \"src\": " << dumpRightValue(trunc->getOperand(0), mod, false, cache) << "\n";
+      oss << "    \"src\": " << dumpRightValue(trunc->getOperand(0), mod, false, cache) << ",\n";
+      valued = true;
     } else if (auto zext = llvm::dyn_cast<llvm::ZExtInst>(i)) {
       oss << "    \"lval\": " << cache[zext] << ",\n";
       oss << "    \"opcode\": \"zext\",\n";
       oss << "    \"dst_type\": \"" << *zext->getType() << "\",\n";
       oss << "    \"src_type\": \"" << *zext->getOperand(0)->getType() << "\",\n";
-      oss << "    \"src\": " << dumpRightValue(zext->getOperand(0), mod, false, cache) << "\n";
+      oss << "    \"src\": " << dumpRightValue(zext->getOperand(0), mod, false, cache) << ",\n";
+      valued = true;
     } else if (auto store = llvm::dyn_cast<llvm::StoreInst>(i)) {
       oss << "    \"opcode\": \"store\",\n";
       oss << "    \"val\": " << dumpRightValue(store->getValueOperand(), mod, false, cache) << ",\n";
       oss << "    \"ptr\": " << dumpRightValue(store->getPointerOperand(), mod, false, cache) << ",\n";
       oss << "    \"align\": " << store->getAlign().value() << "\n";
+      valued = false;
     } else if (auto call = llvm::dyn_cast<llvm::CallInst>(i)) {
       oss << "    \"opcode\": \"call\",\n";
       oss << "    \"tail\": \"" << call->isTailCall() << "\",\n";
@@ -163,14 +197,24 @@ std::string dumpInstruction(llvm::Value *v, LinearizedValues &cache) {
         }
       }
       oss << "]\n";
+      if (call->getType()->isVoidTy()) {
+        valued = false;
+      } else {
+        oss << ",";
+        valued = true;
+      }
     } else if (auto ret = llvm::dyn_cast<llvm::ReturnInst>(i)) {
       assert(false && "Return should not be handled here.");
     } else {
       oss << "  // TODO: Support dump for the inst above.\n";
     }
+    if (!valued) {
+      oss << "  },\n";
+    }
+    return res;
   }
-  oss << "  },\n";
-  return oss.str();
+  llvm::errs() << *v << "\n";
+  assert(false && "Unsupported value type.");
 }
 
 void createTraceDump(const std::string &s, llvm::IRBuilder<> &builder, llvm::Module *m,
@@ -186,6 +230,35 @@ void createTraceDump(const std::string &s, llvm::IRBuilder<> &builder, llvm::Mod
   llvm::Attribute noundef =
     llvm::Attribute::get(builder.getContext(), llvm::Attribute::AttrKind::NoUndef);
   call->addParamAttr(0, noundef);
+}
+
+void createValueDump(llvm::Instruction *raw, llvm::IRBuilder<> &builder, llvm::Module *m,
+                     llvm::Function *printf) {
+  llvm::Constant *fmt_payload = nullptr;
+  llvm::Value *to_dump = raw;
+  if (raw->getType()->isIntegerTy()) {
+    auto ity = llvm::cast<llvm::IntegerType>(raw->getType());
+    if (ity->getScalarSizeInBits() < 64) {
+      to_dump = builder.CreateSExtOrBitCast(raw, builder.getInt64Ty());
+    }
+    fmt_payload = llvm::ConstantDataArray::getString(m->getContext(), "    \"value\": %ld  },\n");
+  } else if (raw->getType()->isPointerTy()) {
+    auto casted = builder.CreateBitOrPointerCast(raw, builder.getInt64Ty());
+    fmt_payload = llvm::ConstantDataArray::getString(m->getContext(), "    \"value\": %ld  },\n");
+    to_dump = casted;
+  } else {
+    assert(false && "Unsupported type.");
+  }
+  auto fmt_gv = new llvm::GlobalVariable(
+    *m, fmt_payload->getType(), false, llvm::GlobalValue::PrivateLinkage, fmt_payload, ".str", 0,
+    llvm::GlobalValue::NotThreadLocal, llvm::GlobalValue::ExternalLinkage);
+  fmt_gv->setAlignment(llvm::MaybeAlign(1));
+  fmt_gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  auto call = builder.CreateCall(printf, { fmt_gv, to_dump });
+  llvm::Attribute noundef =
+     llvm::Attribute::get(builder.getContext(), llvm::Attribute::AttrKind::NoUndef);
+  call->addParamAttr(0, noundef);
+  call->addParamAttr(1, noundef);
 }
 
 void instrumentEachInstruction(
@@ -246,15 +319,14 @@ void instrumentEachInstruction(
       continue;
     }
     auto &workset = linearized[&f];
-    std::vector<std::tuple<llvm::Instruction*, std::string>> tracer;
+    std::vector<DumpInstruction> tracer;
     bool is_entrance = entrances.count(f.getName().str());
     if (is_entrance) {
-      tracer.push_back({&f.getEntryBlock().front(), "{\n"});
-      tracer.push_back({&f.getEntryBlock().front(), "  \"function\": \"" + f.getName().str() + "\",\n"});
+      tracer.emplace_back(&f.getEntryBlock().front(), "{\n");
+      tracer.emplace_back(&f.getEntryBlock().front(), "  \"function\": \"" + f.getName().str() + "\",\n");
       std::string args = "  \"args\": [";
       bool virgin = true;
       for (auto &arg: f.args()) {
-        auto value = dumpInstruction(&arg, workset);
         std::string buf;
         llvm::raw_string_ostream oss(buf);
         if (!virgin) {
@@ -264,8 +336,8 @@ void instrumentEachInstruction(
         virgin = false;
       }
       args += "],";
-      tracer.push_back({&f.getEntryBlock().front(), args});
-      tracer.push_back({&f.getEntryBlock().front(), "  \"trace\": [\n"});
+      tracer.emplace_back(&f.getEntryBlock().front(), args);
+      tracer.emplace_back(&f.getEntryBlock().front(), "  \"trace\": [\n");
     }
     for (auto &bb: f) {
       std::vector<llvm::PHINode*> phis;
@@ -276,8 +348,11 @@ void instrumentEachInstruction(
         }
         auto func = [&builder, &m, &tracer, &workset](llvm::Instruction &cur, llvm::Instruction &ip) {
           std::ostringstream id;
-          auto value = dumpInstruction(&cur, workset);
-          tracer.push_back({&ip, value});
+          auto dump = dumpInstruction(&cur, workset);
+          if (&ip != &cur) {
+            dump.ip = &ip;
+          }
+          tracer.push_back(dump);
         };
         if (!phis.empty()) {
           for (auto &phi : phis) {
@@ -293,7 +368,7 @@ void instrumentEachInstruction(
             ret_oss << "  {\n";
             if (ret->getReturnValue()) {
               ret_oss << "    \"opcode\": \"ret\",\n";
-              ret_oss << "    \"value\": " << dumpRightValue(ret->getReturnValue(), m, false, workset) << "\n";
+              ret_oss << "    \"value\": " << dumpRightValue(ret->getReturnValue(), m, false, workset) << ",\n";
               ret_oss << "    \"type\": \"" << *ret->getReturnValue()->getType() << "\"\n";
             } else {
               ret_oss << "    \"opcode\": \"ret\",\n";
@@ -306,16 +381,20 @@ void instrumentEachInstruction(
           } else {
             // TODO: Handle non-entrance returns.
           }
-
         } else {
           func(i, i);
         }
       }
     }
     // insert tracers
-    for (auto &[i, value]: tracer) {
-      builder.SetInsertPoint(i);
-      createTraceDump(value, builder, m, fputs, __stdout);
+    for (auto &elem: tracer) {
+      auto ip = elem.getInsertPoint();
+      builder.SetInsertPoint(ip);
+      createTraceDump(elem.dump, builder, m, fputs, __stdout);
+      if (elem.valued) {
+        assert(elem.raw);
+        createValueDump(elem.raw, builder, m, printf);
+      }
     }
   }
   std::string buf;
